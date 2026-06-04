@@ -510,11 +510,11 @@ class AutoLearner:
         log(f"  视频播放中，等待下一节...")
 
     def _do_course(self, img, color, gray, sw, sh):
+        # 步骤1: 当前页面内找未完成课程
         inc = self.detector.find_incomplete(color, sw, sh)
         if inc:
             gx, gy = inc
             self._do_click(img, gx, gy, 0.8, 'incomplete')
-            # 验证：点完后是否进入了视频页 -> 有关闭按钮就是视频页
             time.sleep(2)
             _, c2, g2 = ImageUtils.screenshot()
             sw2, sh2 = c2.shape[1], c2.shape[0]
@@ -526,45 +526,68 @@ class AutoLearner:
                 log("  -> 视频")
                 return
             else:
-                # 点错了，记录位置避免重复，然后滚动
-                log(f"  误点击 ({gx},{gy})，滚动避开...")
-                self.course_scrolls += 1
-                if self.course_scrolls < Config.SCROLL_LIMIT:
-                    ActionExecutor.scroll_down()
-                    log(f"  向下滚动 ({self.course_scrolls}/{Config.SCROLL_LIMIT})")
-                    return
-                # 滚动已达上限，走切换选项卡逻辑
-                self.course_scrolls = Config.SCROLL_LIMIT + 1
+                log(f"  误点击 ({gx},{gy})，跳过继续...")
+                # 不return，继续往下走滚动逻辑
 
-        if self.course_scrolls < Config.SCROLL_LIMIT:
-            self.course_scrolls += 1
-            ActionExecutor.scroll_down()
-            log(f"  向下滚动 ({self.course_scrolls}/{Config.SCROLL_LIMIT})")
+        # 步骤2: 还没滚到底，一次性跳到底
+        if self.course_scrolls == 0:
+            log("  未找到未完成，跳转到页底...")
+            pyautogui.press('end')
+            time.sleep(1)
+            self.course_scrolls = 1  # 标记已滚到底
             return
 
-        # 滚到底了，向上滚回中间区域找选项卡
-        log("  滚到底，向上滚回找选项卡...")
-        for _ in range(5):
-            ActionExecutor.scroll_up()
+        # 步骤3: 在底部检查是否有未完成
+        inc2 = self.detector.find_incomplete(color, sw, sh)
+        if inc2:
+            gx, gy = inc2
+            self._do_click(img, gx, gy, 0.8, 'incomplete')
+            time.sleep(2)
+            _, c2, g2 = ImageUtils.screenshot()
+            sw2, sh2 = c2.shape[1], c2.shape[0]
+            if self.detector.find_close(c2, g2, sw2, sh2):
+                self.course_scrolls = 0
+                self.state = State.VIDEO
+                self.miss_count = 0
+                log("  -> 视频")
+                return
+            else:
+                log("  误点击，继续...")
+
+        # 步骤4: 底部也没有，向上找必修/选修切换标签
+        log("  底部无未完成，向上找选项卡...")
+        # 先用Home回到顶部附近，选项卡在中上部
+        pyautogui.press('home')
         time.sleep(1)
-        img2, color2, gray2 = ImageUtils.screenshot()
-        sw2, sh2 = color2.shape[1], color2.shape[0]
-        tabs = self.detector.find_tabs(color2, sw2, sh2)
 
-        # 选项卡通常在页面20%-35%区域、屏幕中央偏左/偏右
+        _, c3, g3 = ImageUtils.screenshot()
+        sw3, sh3 = c3.shape[1], c3.shape[0]
+        tabs = self.detector.find_tabs(c3, sw3, sh3)
+
+        # 步骤5: 找不到选项卡就逐渐向下滚
         if not tabs or len(tabs) < 2:
-            # 兜底：在常见位置尝试切换（左标签 + 右标签）
-            ty = int(sh2 * 0.28)  # 选项卡大概在28%高度
-            tabs = [(int(sw2 * 0.30), ty), (int(sw2 * 0.50), ty)]
-            log(f"  未检测到选项卡，使用估算位置")
+            for offset in range(5):
+                ActionExecutor.scroll_down()
+                time.sleep(0.3)
+                _, c3, g3 = ImageUtils.screenshot()
+                sw3, sh3 = c3.shape[1], c3.shape[0]
+                tabs = self.detector.find_tabs(c3, sw3, sh3)
+                if tabs and len(tabs) >= 2:
+                    break
+                log(f"  向上找选项卡...({offset+1}/5)")
 
-        self.tab_index = (self.tab_index + 1) % len(tabs)
-        tx, ty = tabs[self.tab_index]
-        ActionExecutor.click(tx, ty)
-        self.clicks += 1
+        if tabs and len(tabs) >= 1:
+            self.tab_index = (self.tab_index + 1) % len(tabs)
+            tx, ty = tabs[self.tab_index]
+            ActionExecutor.click(tx, ty)
+            self.clicks += 1
+            self.course_scrolls = 0
+            time.sleep(2)
+            log(f"  切换选项卡 ({tx},{ty})")
+            return
+
+        log("  暂无目标，继续等待...")
         self.course_scrolls = 0
-        time.sleep(2)
-        log(f"  切换选项卡 ({tx},{ty})")
 
     def _do_click(self, img, cx, cy, score, name):
         fn = ImageUtils.save(img, cx, cy, score, f"{name}_r{self.scan_count}")
