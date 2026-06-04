@@ -538,7 +538,7 @@ class AutoLearner:
 
         if self.course_scrolls < Config.SCROLL_LIMIT:
             self.course_scrolls += 1
-            ActionExecutor.scroll(-500)
+            ActionExecutor.scroll_down()
             log(f"  向下滚动 ({self.course_scrolls}/{Config.SCROLL_LIMIT})")
             return
 
