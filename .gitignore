@@ -1,0 +1,15 @@
+# 重庆人社局在线学习自动化工具
+
+## .gitignore
+__pycache__/
+*.pyc
+screenshots/
+.DS_Store
+.claude/
+*.png
+*.jpg
+*.exe
+!button_template.png
+!close_button_template.png
+!confirm_button_template.png
+!queren2.png
