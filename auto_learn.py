@@ -375,15 +375,6 @@ class AutoLearner:
     def _scan(self):
         self.scan_count += 1
 
-        # 进入选课页时刷新页面
-        if self.needs_refresh and self.state == State.COURSE:
-            self.needs_refresh = False
-            log("刷新页面(F5)，等待10秒...")
-            ActionExecutor.focus_browser()
-            pyautogui.press('f5')
-            time.sleep(10)
-            ActionExecutor.scroll_down()
-
         img, color, gray = ImageUtils.screenshot()
         sw, sh = img.size
 
@@ -428,6 +419,18 @@ class AutoLearner:
             self.state = State.COURSE
             self.course_scrolls = 0
             self.needs_refresh = True
+
+        # 自检后才刷新——确保只在课程列表页刷新
+        if self.needs_refresh and self.state == State.COURSE:
+            self.needs_refresh = False
+            log("刷新页面(F5)，等待10秒...")
+            ActionExecutor.focus_browser()
+            pyautogui.press('f5')
+            time.sleep(10)
+            ActionExecutor.scroll_down()
+            # 刷新后重新截图
+            img, color, gray = ImageUtils.screenshot()
+            sw, sh = img.size
 
         if self.state == State.VIDEO:
             self._do_video(img, color, gray, sw, sh)
