@@ -100,11 +100,14 @@ class Templates:
         self.close_btn    = ImageUtils.load(os.path.join(SCRIPT_DIR, "close_button_template.png"))
         self.confirm_btn  = ImageUtils.load(os.path.join(SCRIPT_DIR, "confirm_button_template.png"))
         self.done_confirm = ImageUtils.load(os.path.join(SCRIPT_DIR, "queren2.png"))
-        self.tab_area     = ImageUtils.load(os.path.join(SCRIPT_DIR, "tab_template.png"))
+        self.tab_biuxiu   = ImageUtils.load(os.path.join(SCRIPT_DIR, "bixiuke.png"))
+        self.tab_xuanxiu  = ImageUtils.load(os.path.join(SCRIPT_DIR, "xuanxiuke.png"))
 
     def check_loaded(self):
-        ok = sum(1 for t in [self.next_btn, self.close_btn, self.confirm_btn, self.done_confirm] if t)
-        log(f"模板加载: {ok}/4 (+tab={self.tab_area is not None})")
+        btns = [self.next_btn, self.close_btn, self.confirm_btn, self.done_confirm]
+        ok = sum(1 for t in btns if t)
+        tabs_ok = self.tab_biuxiu is not None and self.tab_xuanxiu is not None
+        log(f"模板加载: {ok}/4 按钮, 选项卡={'OK' if tabs_ok else '缺'}")
         return ok >= 3
 
 # ======================== 检测器 ========================
@@ -251,20 +254,14 @@ class Detector:
         return candidates[0][:2]
 
     def find_tabs(self, gray, sw, sh):
-        """用模板匹配找选项卡区域，返回[(x,y), ...]"""
-        t = self.tmpl.tab_area
-        if not t: return []
-        _, tw, th, _, _ = t
-        # 在15%-35%屏幕区域搜索
-        r = ImageUtils.match(gray, t, (0, int(sh*0.15), sw, int(sh*0.40)))
-        if r:
-            cx, cy, score = r
-            # 在匹配区域内返回左右两个点击位置（必修/选修各一个）
-            # 模板宽度215px覆盖两个tab，按比例平分
-            left_x = cx - tw//4   # 左tab（必修课）
-            right_x = cx + tw//4  # 右tab（选修课）
-            return [(left_x, cy), (right_x, cy)] if score > 0.35 else []
-        return []
+        """用精确模板匹配找必修/选修选项卡按钮"""
+        results = []
+        for tmpl in [self.tmpl.tab_biuxiu, self.tmpl.tab_xuanxiu]:
+            if not tmpl: continue
+            r = ImageUtils.match(gray, tmpl, (0, int(sh*0.10), sw, int(sh*0.45)))
+            if r:
+                results.append(r)
+        return [(cx, cy) for cx, cy, _ in results] if results else []
 
     def has_page(self, color, sw, sh):
         r, g, b = color[:,:,0], color[:,:,1], color[:,:,2]
