@@ -332,9 +332,9 @@ class ActionExecutor:
 
     @staticmethod
     def focus_browser():
-        """右键点击右上角获取焦点，不触发任何页面元素"""
+        """右键点击屏幕中央获取焦点，右键不会触发页面导航"""
         sw, sh = pyautogui.size()
-        pyautogui.rightClick(int(sw * 0.95), int(sh * 0.04))
+        pyautogui.rightClick(int(sw * 0.5), int(sh * 0.5))
         time.sleep(0.3)
 
     @staticmethod
