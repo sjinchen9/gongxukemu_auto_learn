@@ -100,10 +100,11 @@ class Templates:
         self.close_btn    = ImageUtils.load(os.path.join(SCRIPT_DIR, "close_button_template.png"))
         self.confirm_btn  = ImageUtils.load(os.path.join(SCRIPT_DIR, "confirm_button_template.png"))
         self.done_confirm = ImageUtils.load(os.path.join(SCRIPT_DIR, "queren2.png"))
+        self.tab_area     = ImageUtils.load(os.path.join(SCRIPT_DIR, "tab_template.png"))
 
     def check_loaded(self):
         ok = sum(1 for t in [self.next_btn, self.close_btn, self.confirm_btn, self.done_confirm] if t)
-        log(f"模板加载: {ok}/4")
+        log(f"模板加载: {ok}/4 (+tab={self.tab_area is not None})")
         return ok >= 3
 
 # ======================== 检测器 ========================
@@ -249,59 +250,21 @@ class Detector:
         candidates.sort(key=lambda p: p[1])
         return candidates[0][:2]
 
-    def find_tabs(self, color, sw, sh):
-        """在课程列表页找选项卡：屏幕20%-35%区域、深色文字水平排列"""
-        r, g, b = color[:,:,0], color[:,:,1], color[:,:,2]
-        tab_m = ((r < 80) & (g < 80) & (b > 120)) | \
-                ((np.abs(r.astype(int)-g.astype(int)) < 20) & (np.abs(g.astype(int)-b.astype(int)) < 20) & (r > 40) & (r < 120))
-        tab_m[:int(sh*0.20), :] = False
-        tab_m[int(sh*0.38):, :] = False
-        ys, xs = np.where(tab_m)
-        if len(xs) < 200:
-            return []
-
-        # 按6px band聚类X
-        candidates = []
-        for band_y in range(int(sh*0.20), int(sh*0.38), 6):
-            band_mask = (ys >= band_y) & (ys < band_y + 6)
-            if band_mask.sum() < 30: continue
-            bx = xs[band_mask]
-            sorted_x = sorted(set(int(x) for x in bx))
-            cur = [sorted_x[0]]
-            for x in sorted_x[1:]:
-                if x - cur[-1] < 40:
-                    cur.append(x)
-                else:
-                    if len(cur) > 15:
-                        candidates.append((sum(cur)//len(cur), band_y + 3))
-                    cur = [x]
-            if len(cur) > 15:
-                candidates.append((sum(cur)//len(cur), band_y + 3))
-
-        if len(candidates) < 2: return []
-
-        # 按Y分组（连续元素Y差<10px），找至少2个元素的组
-        candidates.sort(key=lambda c: c[1])
-        groups, cur = [], [candidates[0]]
-        for c in candidates[1:]:
-            if c[1] - cur[-1][1] < 10:
-                cur.append(c)
-            else:
-                if len(cur) >= 2:
-                    cur.sort(key=lambda x: x[0])
-                    groups.append(cur)
-                cur = [c]
-        if len(cur) >= 2:
-            cur.sort(key=lambda x: x[0])
-            groups.append(cur)
-
-        # 返回第一组，去重（X间距<50px合并）
-        if not groups: return []
-        merged = [groups[0][0]]
-        for cx, cy in groups[0][1:]:
-            if cx - merged[-1][0] > 50:
-                merged.append((cx, cy))
-        return merged if len(merged) >= 2 else []
+    def find_tabs(self, gray, sw, sh):
+        """用模板匹配找选项卡区域，返回[(x,y), ...]"""
+        t = self.tmpl.tab_area
+        if not t: return []
+        _, tw, th, _, _ = t
+        # 在15%-35%屏幕区域搜索
+        r = ImageUtils.match(gray, t, (0, int(sh*0.15), sw, int(sh*0.40)))
+        if r:
+            cx, cy, score = r
+            # 在匹配区域内返回左右两个点击位置（必修/选修各一个）
+            # 模板宽度215px覆盖两个tab，按比例平分
+            left_x = cx - tw//4   # 左tab（必修课）
+            right_x = cx + tw//4  # 右tab（选修课）
+            return [(left_x, cy), (right_x, cy)] if score > 0.35 else []
+        return []
 
     def has_page(self, color, sw, sh):
         r, g, b = color[:,:,0], color[:,:,1], color[:,:,2]
@@ -335,6 +298,12 @@ class ActionExecutor:
             c.pack(); c.create_oval(5,5,55,55, outline='red', width=3)
             root.after(600, root.destroy); root.mainloop()
         except: pass
+
+    @staticmethod
+    def focus_browser():
+        """点击屏幕中央确保浏览器获得焦点"""
+        pyautogui.click(pyautogui.size()[0]//2, pyautogui.size()[1]//2)
+        time.sleep(0.3)
 
     @staticmethod
     def scroll_down():
@@ -412,10 +381,10 @@ class AutoLearner:
         if self.needs_refresh and self.state == State.COURSE:
             self.needs_refresh = False
             log("刷新页面(F5)，等待10秒...")
+            ActionExecutor.focus_browser()
             pyautogui.press('f5')
             time.sleep(10)
-            # 刷新后向下滚动一段，让课程卡片可见
-            ActionExecutor.scroll_down()  # 向下翻页，让课程卡片显示出来
+            ActionExecutor.scroll_down()
 
         img, color, gray = ImageUtils.screenshot()
         sw, sh = img.size
@@ -510,7 +479,6 @@ class AutoLearner:
         log(f"  视频播放中，等待下一节...")
 
     def _do_course(self, img, color, gray, sw, sh):
-        # 步骤1: 当前页面内找未完成课程
         inc = self.detector.find_incomplete(color, sw, sh)
         if inc:
             gx, gy = inc
@@ -527,17 +495,17 @@ class AutoLearner:
                 return
             else:
                 log(f"  误点击 ({gx},{gy})，跳过继续...")
-                # 不return，继续往下走滚动逻辑
 
-        # 步骤2: 还没滚到底，一次性跳到底
+        # 还没滚到底，一次性跳到底
         if self.course_scrolls == 0:
             log("  未找到未完成，跳转到页底...")
+            ActionExecutor.focus_browser()
             pyautogui.press('end')
             time.sleep(1)
-            self.course_scrolls = 1  # 标记已滚到底
+            self.course_scrolls = 1
             return
 
-        # 步骤3: 在底部检查是否有未完成
+        # 在底部检查是否有未完成
         inc2 = self.detector.find_incomplete(color, sw, sh)
         if inc2:
             gx, gy = inc2
@@ -554,36 +522,31 @@ class AutoLearner:
             else:
                 log("  误点击，继续...")
 
-        # 步骤4: 底部也没有，向上找必修/选修切换标签
-        log("  底部无未完成，向上找选项卡...")
-        # 先用Home回到顶部附近，选项卡在中上部
+        # 底部也没有 → 回顶部，逐步向下找选项卡
+        log("  底部无未完成，回顶部找选项卡...")
+        ActionExecutor.focus_browser()
         pyautogui.press('home')
         time.sleep(1)
 
-        _, c3, g3 = ImageUtils.screenshot()
-        sw3, sh3 = c3.shape[1], c3.shape[0]
-        tabs = self.detector.find_tabs(c3, sw3, sh3)
-
-        # 步骤5: 找不到选项卡就逐渐向下滚
-        if not tabs or len(tabs) < 2:
-            for offset in range(5):
+        tabs = None
+        for offset in range(6):
+            _, c3, g3 = ImageUtils.screenshot()
+            sw3, sh3 = c3.shape[1], c3.shape[0]
+            tabs = self.detector.find_tabs(g3, sw3, sh3)
+            if tabs and len(tabs) >= 2:
+                break
+            if offset < 5:
                 ActionExecutor.scroll_down()
-                time.sleep(0.3)
-                _, c3, g3 = ImageUtils.screenshot()
-                sw3, sh3 = c3.shape[1], c3.shape[0]
-                tabs = self.detector.find_tabs(c3, sw3, sh3)
-                if tabs and len(tabs) >= 2:
-                    break
-                log(f"  向上找选项卡...({offset+1}/5)")
+                log(f"  向下找选项卡...({offset+1}/5)")
 
         if tabs and len(tabs) >= 1:
             self.tab_index = (self.tab_index + 1) % len(tabs)
             tx, ty = tabs[self.tab_index]
+            log(f"  切换选项卡 ({tx},{ty})")
             ActionExecutor.click(tx, ty)
             self.clicks += 1
             self.course_scrolls = 0
             time.sleep(2)
-            log(f"  切换选项卡 ({tx},{ty})")
             return
 
         log("  暂无目标，继续等待...")
