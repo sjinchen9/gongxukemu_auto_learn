@@ -298,8 +298,9 @@ class ActionExecutor:
 
     @staticmethod
     def focus_browser():
-        """点击屏幕中央确保浏览器获得焦点"""
-        pyautogui.click(pyautogui.size()[0]//2, pyautogui.size()[1]//2)
+        """点击右上角蓝色标题栏区域获取焦点（安全区域，不会有可点击元素）"""
+        sw, sh = pyautogui.size()
+        pyautogui.click(int(sw * 0.95), int(sh * 0.04))
         time.sleep(0.3)
 
     @staticmethod
@@ -374,7 +375,7 @@ class AutoLearner:
     def _scan(self):
         self.scan_count += 1
 
-        # 进入选课页时刷新页面，确保课程状态是最新的
+        # 进入选课页时刷新页面
         if self.needs_refresh and self.state == State.COURSE:
             self.needs_refresh = False
             log("刷新页面(F5)，等待10秒...")
@@ -420,6 +421,7 @@ class AutoLearner:
         if on_video and self.state == State.COURSE:
             log(f"  自检修正: -> 视频")
             self.state = State.VIDEO
+            self.needs_refresh = False  # 进视频页清除刷新标志
             self.miss_count = 0
         elif not on_video and self.state == State.VIDEO:
             log(f"  自检修正: -> 选课")
@@ -487,6 +489,7 @@ class AutoLearner:
             if close:
                 self.course_scrolls = 0
                 self.state = State.VIDEO
+                self.needs_refresh = False
                 self.miss_count = 0
                 log("  -> 视频")
                 return
@@ -513,6 +516,7 @@ class AutoLearner:
             if self.detector.find_close(c2, g2, sw2, sh2):
                 self.course_scrolls = 0
                 self.state = State.VIDEO
+                self.needs_refresh = False
                 self.miss_count = 0
                 log("  -> 视频")
                 return
