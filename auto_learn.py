@@ -102,6 +102,7 @@ class Templates:
         self.done_confirm = ImageUtils.load(os.path.join(SCRIPT_DIR, "queren2.png"))
         self.tab_biuxiu   = ImageUtils.load(os.path.join(SCRIPT_DIR, "bixiuke.png"))
         self.tab_xuanxiu  = ImageUtils.load(os.path.join(SCRIPT_DIR, "xuanxiuke.png"))
+        self.pagination   = ImageUtils.load(os.path.join(SCRIPT_DIR, "qianwangdijiye.png"))
 
     def check_loaded(self):
         btns = [self.next_btn, self.close_btn, self.confirm_btn, self.done_confirm]
@@ -263,6 +264,39 @@ class Detector:
                 results.append(r)
         return [(cx, cy) for cx, cy, _ in results] if results else []
 
+    def find_pagination(self, gray, color, sw, sh):
+        """检测页面底部的翻页栏，返回下一页按钮坐标"""
+        t = self.tmpl.pagination
+        if not t: return None
+        _, tw, th, _, _ = t
+        # 搜索屏幕底部40%
+        r = ImageUtils.match(gray, t, (0, int(sh*0.55), sw, sh))
+        if not r: return None
+        mx, my, _ = r
+        # 在匹配区域内找蓝色数字按钮，取最右边那个（下一页）
+        y1 = max(0, my - th//2)
+        x1 = max(0, mx - tw//2)
+        y2 = min(sh, y1 + th)
+        x2 = min(sw, x1 + tw)
+        patch = color[y1:y2, x1:x2]
+        blue = (patch[:,:,2] > 150) & (patch[:,:,0] < 120)
+        if not blue.any(): return None
+        ys, xs = np.where(blue)
+        # 找蓝色像素簇
+        sorted_x = sorted(set(int(x) for x in xs))
+        clusters, cur = [], [sorted_x[0]]
+        for x in sorted_x[1:]:
+            if x - cur[-1] < 15: cur.append(x)
+            else:
+                if len(cur) > 3: clusters.append(sum(cur)//len(cur))
+                cur = [x]
+        if len(cur) > 3: clusters.append(sum(cur)//len(cur))
+        if not clusters: return None
+        # 点击最右边的蓝色数字（下一页或>箭头）
+        rightmost_x = x1 + clusters[-1]
+        click_y = y1 + int(ys.mean())
+        return (rightmost_x, click_y)
+
     def has_page(self, color, sw, sh):
         r, g, b = color[:,:,0], color[:,:,1], color[:,:,2]
         blue = (b>150) & (r<100) & (g<150)
@@ -298,9 +332,9 @@ class ActionExecutor:
 
     @staticmethod
     def focus_browser():
-        """点击右上角蓝色标题栏区域获取焦点（安全区域，不会有可点击元素）"""
+        """右键点击右上角获取焦点，不触发任何页面元素"""
         sw, sh = pyautogui.size()
-        pyautogui.click(int(sw * 0.95), int(sh * 0.04))
+        pyautogui.rightClick(int(sw * 0.95), int(sh * 0.04))
         time.sleep(0.3)
 
     @staticmethod
@@ -526,8 +560,19 @@ class AutoLearner:
             else:
                 log("  误点击，继续...")
 
-        # 底部也没有 → 回顶部，逐步向下找选项卡
-        log("  底部无未完成，回顶部找选项卡...")
+        # 底部也没有 → 检查是否有翻页栏
+        pg = self.detector.find_pagination(gray, color, sw, sh)
+        if pg:
+            px, py = pg
+            log(f"  点击翻页 ({px},{py})")
+            ActionExecutor.click(px, py)
+            self.clicks += 1
+            self.course_scrolls = 0
+            time.sleep(3)
+            return
+
+        # 没有翻页栏 → 回顶部逐步向下找选项卡
+        log("  无翻页，回顶部找选项卡...")
         ActionExecutor.focus_browser()
         pyautogui.press('home')
         time.sleep(1)
