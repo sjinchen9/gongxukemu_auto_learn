@@ -323,21 +323,39 @@ class Detector:
         patch = color[y1:y2, x1:x2]
         blue = (patch[:,:,2] > 150) & (patch[:,:,0] < 120)
         if not blue.any(): return None
-        ys, xs = np.where(blue)
-        # 找蓝色像素簇
-        sorted_x = sorted(set(int(x) for x in xs))
-        clusters, cur = [], [sorted_x[0]]
+        ys_list, xs_list = np.where(blue)
+        # 找蓝色像素簇（按X坐标分组）
+        sorted_x = sorted(set(int(x) for x in xs_list))
+        clusters = []
+        cur = [sorted_x[0]]
         for x in sorted_x[1:]:
             if x - cur[-1] < 15: cur.append(x)
             else:
-                if len(cur) > 3: clusters.append(sum(cur)//len(cur))
+                if len(cur) > 3:
+                    cx = sum(cur) // len(cur)
+                    # 计算这个簇的蓝色强度
+                    cluster_blue_count = sum(1 for bx in xs_list if abs(bx - cx) < 10)
+                    clusters.append((cx, cluster_blue_count))
                 cur = [x]
-        if len(cur) > 3: clusters.append(sum(cur)//len(cur))
-        if not clusters: return None
-        # 点击最右边的蓝色数字（下一页或>箭头）
-        rightmost_x = x1 + clusters[-1]
-        click_y = y1 + int(ys.mean())
-        return (rightmost_x, click_y)
+        if len(cur) > 3:
+            cx = sum(cur) // len(cur)
+            cluster_blue_count = sum(1 for bx in xs_list if abs(bx - cx) < 10)
+            clusters.append((cx, cluster_blue_count))
+        if len(clusters) < 2: return None
+
+        # 按X坐标排序
+        clusters.sort(key=lambda c: c[0])
+        # 找到蓝色最强的簇（当前页码高亮）
+        max_blue_idx = max(range(len(clusters)), key=lambda i: clusters[i][1])
+        # 点击当前页右边的下一个数字
+        next_idx = max_blue_idx + 1
+        if next_idx < len(clusters):
+            target_x = x1 + clusters[next_idx][0]
+        else:
+            # 没有下一个数字，用最右边的（>符号或最后一页）
+            target_x = x1 + clusters[-1][0]
+        click_y = y1 + int(ys_list.mean())
+        return (target_x, click_y)
 
     @staticmethod
     def _match(screen_gray, tmpl, region=None):
