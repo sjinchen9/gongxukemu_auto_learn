@@ -1,9 +1,6 @@
 @echo off
-echo.
-echo ================================================
-echo    auto_learn v4.0 is starting, please wait...
-echo    (first-time OCR model loading takes ~30s)
-echo ================================================
-echo.
-py -3.11 "%~dp0auto_learn_v4.py"
+chcp 65001 >nul
+cd /d "%~dp0"
+set OMP_NUM_THREADS=4
+py -3.11 auto_learn_v4.py
 pause

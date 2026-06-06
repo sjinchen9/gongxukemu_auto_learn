@@ -6,3 +6,11 @@ __pycache__/
 # 系统文件
 Thumbs.db
 desktop.ini
+
+# Claude Code 本地文件
+.claude/
+memory/
+
+# Python 虚拟环境
+venv/
+.venv/

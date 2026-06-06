@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-自动学习脚本 v4.0 — OCR驱动版
+自动学习脚本 v4.0 — OCR驱动版 (Python 3.11)
 v3 全部架构 + PaddleOCR 文字识别替换 NCC/颜色检测
 运行: py -3.11 auto_learn_v4.py
 """
 
 import sys
-if sys.version_info.major != 3 or sys.version_info.minor != 11:
+_pyver = (sys.version_info.major, sys.version_info.minor)
+if _pyver < (3, 8) or _pyver > (3, 12):
     print("=" * 50)
-    print("错误: 必须用 Python 3.11 运行此脚本")
-    print(f"当前: Python {sys.version}")
-    print("正确命令: py -3.11 auto_learn_v4.py")
+    print(f"警告: Python {sys.version_info.major}.{sys.version_info.minor} 未测试")
+    print("预期 Python 3.8-3.12，继续运行但不保证稳定")
     print("=" * 50)
-    input("按回车退出...")
-    sys.exit(1)
 
 import time, os, threading, ctypes, msvcrt
 import pyautogui
@@ -105,6 +103,11 @@ _os.environ.setdefault('FLAGS_v', '0')
 _os.environ.setdefault('FLAGS_minloglevel', '3')
 _os.environ.setdefault('DISABLE_PADDLE_LOG', '1')
 
+# 禁用 oneDNN/MKL-DNN（避免某些 CPU 上的兼容性崩溃）
+# 注意：这里必须用 setdefault 而不是直接赋值，否则可能覆盖 .bat 文件中预设的值
+for _onednn_flag in ('FLAGS_use_mkldnn', 'FLAGS_use_onednn', 'KMP_SETTINGS'):
+    _os.environ.setdefault(_onednn_flag, '0')
+
 # 重定向stderr 吃掉Paddle的C++日志
 import io
 _stderr_backup = _sys.stderr
@@ -112,6 +115,11 @@ _sys.stderr = io.StringIO()
 
 try:
     from paddleocr import PaddleOCR
+    # 用 Paddle API 关闭 oneDNN（环境变量可能被忽略）
+    try:
+        import paddle
+        paddle.set_flags({'FLAGS_use_mkldnn': False})
+    except: pass
 finally:
     _sys.stderr = _stderr_backup  # 恢复stderr
 
@@ -133,29 +141,66 @@ class OCREngine:
             from paddleocr import PaddleOCR
             log("初始化 PaddleOCR...")
             cls._instance = PaddleOCR(lang='ch')
-            cls._instance.ocr(np.zeros((50, 200, 3), dtype=np.uint8))
+            # 预热：用接近真实尺寸的图片（1920x1080），让模型编译在预热阶段完成
+            warmup = np.ones((1080, 1920, 3), dtype=np.uint8) * 255
+            try: cls._instance.ocr(warmup)
+            except: pass
             log("OCR 就绪")
         return cls._instance
 
     @staticmethod
     def scan(img_array):
-        """截屏OCR，返回 [{text, cx, cy, conf}, ...]"""
+        """截屏OCR，返回 [{text, cx, cy, conf}, ...]。4K屏自动缩放到1080p加速"""
         ocr = OCREngine.get()
+        h, w = img_array.shape[:2]
+        # 4K/高分屏缩放：最大宽度1920，大幅降低OCR计算量
+        max_w = 1920
+        if w > max_w:
+            from PIL import Image
+            scale = max_w / w
+            new_w, new_h = max_w, int(h * scale)
+            img_array = np.array(Image.fromarray(img_array).resize((new_w, new_h)))
+        else:
+            scale = 1.0
         result = ocr.ocr(img_array)
         if not result or not result[0]:
             return []
         texts = []
-        for line in result[0]:
-            box, (text, conf) = line
-            if conf < 0.5: continue
-            xs = [p[0] for p in box]
-            ys = [p[1] for p in box]
-            texts.append({
-                'text': text.strip(),
-                'cx': int(sum(xs)/4),
-                'cy': int(sum(ys)/4),
-                'conf': conf,
-            })
+        ocr_result = result[0]
+        # OCRResult 是 dict-like 对象，用 .get() 兼容属性和键访问
+        rec_texts = ocr_result.get('rec_texts', []) if hasattr(ocr_result, 'get') else getattr(ocr_result, 'rec_texts', [])
+        rec_scores = ocr_result.get('rec_scores', []) if hasattr(ocr_result, 'get') else getattr(ocr_result, 'rec_scores', [])
+        rec_polys = ocr_result.get('rec_polys', []) if hasattr(ocr_result, 'get') else getattr(ocr_result, 'rec_polys', [])
+        if rec_texts:
+            for i, (text, conf) in enumerate(zip(rec_texts, rec_scores)):
+                if conf < 0.5:
+                    continue
+                poly = rec_polys[i] if i < len(rec_polys) else None
+                if poly is not None:
+                    poly = poly
+                else:
+                    poly = [[0, 0], [0, 0], [0, 0], [0, 0]]
+                xs = [p[0] / scale for p in poly]
+                ys = [p[1] / scale for p in poly]
+                texts.append({
+                    'text': text.strip(),
+                    'cx': int(sum(xs) / 4),
+                    'cy': int(sum(ys) / 4),
+                    'conf': conf,
+                })
+        else:
+            # 兼容旧版 tuple 格式: [[[box], (text, conf)], ...]
+            for item in result[0]:
+                box, (text, conf) = item
+                if conf < 0.5: continue
+                xs = [p[0] for p in box]
+                ys = [p[1] for p in box]
+                texts.append({
+                    'text': text.strip(),
+                    'cx': int(sum(xs)/4),
+                    'cy': int(sum(ys)/4),
+                    'conf': conf,
+                })
         return texts
 
 # ======================== 截图工具 ========================
@@ -197,7 +242,7 @@ class Detector:
         self._cache_sw = 0
         self._cache_sh = 0
         # 翻页栏模板（NCC匹配，从v3继承的可靠方案）
-        self.pagination_tmpl = ImageUtils.load(os.path.join(SCRIPT_DIR, "qianwangdijiye.png"))
+        self.pagination_tmpl = ImageUtils.load(os.path.join(SCRIPT_DIR, "pagination_bar_template.png"))
 
     def scan(self, img_array):
         """执行OCR并缓存结果"""
