@@ -1,21 +1,8 @@
-# 重庆人社局在线学习自动化工具
-
-## .gitignore
-__pycache__/
-*.pyc
+# 运行时目录
 screenshots/
-.DS_Store
-.claude/
-*.png
-*.jpg
-*.exe
-!button_template.png
-!close_button_template.png
-!confirm_button_template.png
-!queren2.png
-!tab_template.png
-!bixiuke.png
-!xuanxiuke.png
-!qianwangdijiye.png
-Lngbzx_AutoStudy-1.1.0/
-subjects-of-scientific-2022-master/
+logs/
+__pycache__/
+
+# 系统文件
+Thumbs.db
+desktop.ini

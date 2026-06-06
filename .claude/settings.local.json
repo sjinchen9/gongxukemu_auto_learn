@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(python *)",
+      "WebSearch",
+      "Bash(pip install *)",
+      "Bash(tasklist)",
+      "Bash(winget install *)",
+      "WebFetch(domain:github.com)",
+      "Bash(where choco *)",
+      "Bash(where scoop *)",
+      "Bash(curl -sL \"https://api.github.com/repos/indiff/qttabbar/releases/latest\" -H \"User-Agent: Mozilla/5.0\")",
+      "Bash(where gh *)",
+      "Bash(pip uninstall *)",
+      "Bash(tesseract --version)",
+      "Bash(py *)",
+      "Bash(where tesseract *)",
+      "Read(//c/Program Files/Tesseract-OCR/**)",
+      "Read(//c/Program Files \\(x86\\)/Tesseract-OCR/**)",
+      "Bash(curl -L -o \"C:/Program Files/Tesseract-OCR/tessdata/chi_sim.traineddata\" \"https://github.com/tesseract-ocr/tessdata/raw/main/chi_sim.traineddata\")",
+      "Bash(FLAGS_use_mkldnn=0 py *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(awk '{print $NF, $5}')"
+    ]
+  }
+}

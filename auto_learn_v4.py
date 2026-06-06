@@ -46,10 +46,42 @@ class Config:
 # ======================== 工具函数 ========================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCREENSHOTS_DIR = os.path.join(SCRIPT_DIR, "screenshots")
+LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
 os.makedirs(SCREENSHOTS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+class Logger:
+    """双输出日志：终端 + 文件"""
+    _log_file = None
+    _log_path = None
+
+    @classmethod
+    def init(cls, username=""):
+        if cls._log_file:
+            cls._log_file.close()
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        name = f"{username}_" if username else ""
+        cls._log_path = os.path.join(LOGS_DIR, f"{name}{timestamp}.log")
+        cls._log_file = open(cls._log_path, 'w', encoding='utf-8')
+
+    @classmethod
+    def get_path(cls):
+        return cls._log_path
+
+    @classmethod
+    def write(cls, msg):
+        print(msg)
+        if cls._log_file:
+            cls._log_file.write(msg + '\n')
+            cls._log_file.flush()
+
+    @classmethod
+    def close(cls):
+        if cls._log_file:
+            cls._log_file.close()
 
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}")
+    Logger.write(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
 def check_key():
     if msvcrt.kbhit():
@@ -391,6 +423,48 @@ class Detector:
                 return text
         return None
 
+    def find_video_time(self):
+        """检测视频播放器时间轴。格式: 08:11/11:03"""
+        for t in self._cache:
+            text = t['text']
+            if '/' not in text or ':' not in text:
+                continue
+            clean = text.replace(' ', '').replace('|', '').replace('l', '').replace('L', '')
+            if len(clean) > 25:
+                continue
+            # 只要有 / 和 : ，且长度合理，就是时间轴
+            return clean
+        return None
+
+    def find_username(self):
+        """找'退出'文字左侧最近的一个短中文词（2-4字），大概率是姓名"""
+        # 先找"退出"
+        tuichu = None
+        for t in self._cache:
+            if t['text'].strip() == '退出':
+                tuichu = t
+                break
+        if not tuichu:
+            return None
+
+        # 在"退出"左侧找最近的2-4字纯中文
+        best = None
+        best_dist = 9999
+        for t in self._cache:
+            text = t['text'].strip()
+            if not (2 <= len(text) <= 4):
+                continue
+            if not all('一' <= c <= '鿿' for c in text):
+                continue
+            # 必须在"退出"左侧且Y坐标接近
+            if t['cx'] >= tuichu['cx'] or abs(t['cy'] - tuichu['cy']) > 30:
+                continue
+            dist = tuichu['cx'] - t['cx']
+            if dist < best_dist:
+                best_dist = dist
+                best = text
+        return best or ""
+
 # ======================== 动作执行器（v3原样保留） ========================
 class ActionExecutor:
     @staticmethod
@@ -452,24 +526,39 @@ class AutoLearner:
         self.tab_index = 0
         self.needs_refresh = False
         self.done_positions = set()
-        self.last_clicked = None      # _do_course 使用（已废弃，保留兼容）
+        self.last_clicked = None
         self.manual = False
         self.detector = Detector()
+        self.username = ""
+        self.credits_done = False
+        self.courses_completed = 0
 
     def run(self):
+        self._start_time = time.time()
         minimize_console()
+        self._scan_all_texts = []
+        # 先打印到终端，暂不写文件
+        print(f"[{time.strftime('%H:%M:%S')}] " + "=" * 50)
+        print(f"[{time.strftime('%H:%M:%S')}]   自动学习脚本 v4.0（OCR驱动，v3架构）")
+        print(f"[{time.strftime('%H:%M:%S')}] " + "=" * 50)
+        print("3秒后开始扫描...")
+        time.sleep(3)
+        self._scan()
+        # 拿到用户名后初始化日志
+        name = self.username or ""
+        Logger.init(name)
+        # 把头部信息写入日志文件
         log("=" * 50)
-        log("  自动学习脚本 v4.0（OCR驱动，v3架构）")
+        log(f"  自动学习脚本 v4.0（OCR驱动，v3架构）- 用户: {name}")
         log("=" * 50)
         log("  s=手动扫描  a=自动模式  q=退出")
         log(f"  截图保存: {SCREENSHOTS_DIR}")
-        log("3秒后开始扫描...")
-        time.sleep(3)
-        self._scan()
+        log(f"  日志保存: {Logger.get_path()}")
 
-        while self.clicks < Config.MAX_CLICKS:
+        while self.clicks < Config.MAX_CLICKS and not self.credits_done:
             if self.manual:
                 self._scan()
+                if self.credits_done: break
                 for _ in range(10):
                     time.sleep(0.1)
                     cmd = check_key()
@@ -488,6 +577,31 @@ class AutoLearner:
                     self._scan()
 
         log(f"完成！共点击 {self.clicks} 次")
+        if self.credits_done:
+            log("★ 全部学分已完成，脚本自动退出")
+        elapsed = time.time() - self._start_time
+        hours = int(elapsed // 3600)
+        mins = int((elapsed % 3600) // 60)
+        secs = int(elapsed % 60)
+        log(f"总耗时: {hours}小时{mins}分{secs}秒")
+        log(f"用户名: {self.username}")
+        log(f"日志已保存: {Logger.get_path()}")
+
+        # 导出全部OCR文字
+        if self._scan_all_texts:
+            log_path = Logger.get_path() or ""
+            base = os.path.splitext(os.path.basename(log_path))[0] if log_path else f"ocr_dump_{time.strftime('%Y%m%d_%H%M%S')}"
+            ocr_dump_path = os.path.join(LOGS_DIR, f"{base}_ocr.txt")
+            with open(ocr_dump_path, 'w', encoding='utf-8') as f:
+                f.write(f"OCR全量文字导出 - {self.username}\n")
+                f.write(f"总轮数: {self.scan_count} | 总点击: {self.clicks}\n")
+                f.write(f"总耗时: {hours}h{mins}m{secs}s\n")
+                f.write("=" * 50 + "\n\n")
+                for entry in self._scan_all_texts:
+                    f.write(f"[轮次{entry['round']}] {', '.join(entry['texts'][:30])}\n")
+            log(f"OCR全量: {ocr_dump_path}")
+
+        Logger.close()
 
     def _get_interval(self):
         if self.state is None or self.scan_count < Config.INITIAL_SCANS:
@@ -495,6 +609,8 @@ class AutoLearner:
         return Config.SCAN_VIDEO if self.state == State.VIDEO else Config.SCAN_OTHER
 
     def _scan(self):
+        if self.credits_done:
+            return
         self.scan_count += 1
 
         img, color = ImageUtils.screenshot()
@@ -502,6 +618,11 @@ class AutoLearner:
 
         # OCR扫描
         texts = self.detector.scan(color)
+        # 收集OCR全量文字用于最终导出
+        self._scan_all_texts.append({
+            'round': self.scan_count,
+            'texts': [t['text'] for t in texts]
+        })
 
         if not self.detector.has_page(color):
             log(f"第{self.scan_count}轮: 未检测到培训页面，跳过")
@@ -553,15 +674,13 @@ class AutoLearner:
             self.course_scrolls = 0
             self.needs_refresh = True
 
-        # 自检后才刷新
-        if self.needs_refresh and self.state == State.COURSE:
-            self.needs_refresh = False
-            log("刷新页面(F5)，等待10秒...")
-            ActionExecutor.press_key('f5')
-            time.sleep(10)
-            ActionExecutor.scroll_down()
-            img, color = ImageUtils.screenshot()
-            self.detector.scan(color)
+        # 自检后才处理状态
+        # 尝试获取用户名
+        if not self.username:
+            uname = self.detector.find_username()
+            if uname:
+                self.username = uname
+                log(f"  用户: {self.username}")
 
         if self.state == State.VIDEO:
             self._do_video(img, color)
@@ -601,6 +720,12 @@ class AutoLearner:
     # ========== 状态处理（v3原样） ==========
     def _do_video(self, img, color):
         sw, sh = img.size
+
+        # 视频时间轴识别（纯显示，不参与决策）
+        vtime = self.detector.find_video_time()
+        if vtime:
+            log(f"  [视频进度] {vtime}")
+
         nexts = self.detector.find_next()
         if nexts:
             self.miss_count = 0
@@ -628,12 +753,36 @@ class AutoLearner:
         log(f"  视频播放中，等待下一节...")
 
     def _do_course(self, img, color):
-        # === 优先级1: 学分状态检测 ===
+        # 只在选课页尝试获取用户名
+        if not self.username or self.username == '目☆':
+            uname = self.detector.find_username()
+            if uname and len(uname) >= 2:
+                self.username = uname
+                log(f"  用户: {self.username}")
+
+        # === 优先级1: F5刷新（学完一个科目后先刷新） ===
+        if self.needs_refresh:
+            self.needs_refresh = False
+            log("刷新页面(F5)，等待10秒...")
+            ActionExecutor.press_key('f5')
+            time.sleep(10)
+            ActionExecutor.scroll_down()
+            img, color = ImageUtils.screenshot()
+            self.detector.scan(color)
+
+        # === 优先级2: 学分状态检测（刷新后才查） ===
         status_text = self.detector.find_completion_status()
         if status_text:
-            log(f"  [学分状态] {status_text}")
+            log(f"  [学分] {status_text}")
+            # 检查是否全部完成
+            if '0必修' in status_text and '0选修' in status_text:
+                log("=" * 50)
+                log("  ★ 全部学分已学完！")
+                log("=" * 50)
+                self.credits_done = True
+                return
 
-        # === 优先级2: 找未完成 ===
+        # === 优先级3: 找未完成 ===
         inc = self.detector.find_incomplete(self.done_positions)
         if inc:
             gx, gy = inc

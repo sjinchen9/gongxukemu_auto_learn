@@ -99,13 +99,14 @@ class Templates:
         self.next_btn     = ImageUtils.load(os.path.join(SCRIPT_DIR, "button_template.png"))
         self.close_btn    = ImageUtils.load(os.path.join(SCRIPT_DIR, "close_button_template.png"))
         self.confirm_btn  = ImageUtils.load(os.path.join(SCRIPT_DIR, "confirm_button_template.png"))
-        self.done_confirm = ImageUtils.load(os.path.join(SCRIPT_DIR, "queren2.png"))
         self.tab_biuxiu   = ImageUtils.load(os.path.join(SCRIPT_DIR, "bixiuke.png"))
         self.tab_xuanxiu  = ImageUtils.load(os.path.join(SCRIPT_DIR, "xuanxiuke.png"))
         self.pagination   = ImageUtils.load(os.path.join(SCRIPT_DIR, "qianwangdijiye.png"))
+        self.incomplete_txt = ImageUtils.load(os.path.join(SCRIPT_DIR, "char_wei.png"))
+        self.yiwancheng_txt = ImageUtils.load(os.path.join(SCRIPT_DIR, "char_yi.png"))
 
     def check_loaded(self):
-        btns = [self.next_btn, self.close_btn, self.confirm_btn, self.done_confirm]
+        btns = [self.next_btn, self.close_btn, self.confirm_btn]
         ok = sum(1 for t in btns if t)
         tabs_ok = self.tab_biuxiu is not None and self.tab_xuanxiu is not None
         log(f"模板加载: {ok}/4 按钮, 选项卡={'OK' if tabs_ok else '缺'}")
@@ -177,80 +178,149 @@ class Detector:
         return None
 
     def find_confirm(self, color, gray, sw, sh):
-        for tmpl, name in [(self.tmpl.confirm_btn, 'confirm'), (self.tmpl.done_confirm, 'done_confirm')]:
-            if not tmpl: continue
-            _, tw, th, _, _ = tmpl
-            r = ImageUtils.match(gray, tmpl, (int(sw*0.2), int(sh*0.2), int(sw*0.8), int(sh*0.8)))
-            if r:
-                cx, cy, score = r
-                if sh*0.3 < cy < sh*0.7 and self._check_blue(color, cx, cy, tw, th, sh, sw):
-                    return (cx, cy, score, name)
+        """
+        检测弹窗确定按钮（结构上下文法）
+        弹窗 = 半透明遮罩 + 白色对话框容器 + 蓝色确定按钮
+        必须先检测到白色对话框容器，再在容器内搜索按钮
+        """
+        tmpl = self.tmpl.confirm_btn
+        if not tmpl: return None
+        _, tw, th, _, _ = tmpl
+
+        # === 第一步：检测弹窗对话框容器（白色/浅色矩形） ===
+        r, g, b = color[:,:,0], color[:,:,1], color[:,:,2]
+
+        # 对话框特征：中间偏下的白色矩形区域
+        # 搜索范围：屏幕中心区域
+        dialog_region = color[int(sh*0.25):int(sh*0.65), int(sw*0.2):int(sw*0.8)]
+        white_mask = (
+            (dialog_region[:,:,0] > 180) & (dialog_region[:,:,1] > 180) & (dialog_region[:,:,2] > 180)
+            |
+            (dialog_region[:,:,0] > 200) & (dialog_region[:,:,1] > 200) & (dialog_region[:,:,2] > 200)
+        )
+
+        if white_mask.sum() < 5000:  # 至少5000个白色像素（足够大的对话框）
+            return None
+
+        # 白色区域必须成团（连通），不能散落
+        ys, xs = np.where(white_mask)
+        y_min = int(sh*0.25) + int(ys.min())
+        y_max = int(sh*0.25) + int(ys.max())
+        x_min = int(sw*0.2) + int(xs.min())
+        x_max = int(sw*0.2) + int(xs.max())
+
+        dw, dh = x_max - x_min, y_max - y_min
+        if dw < 200 or dh < 80:  # 对话框至少200x80像素
+            return None
+        if dw > sw * 0.7 or dh > sh * 0.5:  # 不能太大（排除全屏白色页面）
+            return None
+
+        # === 第二步：验证周围有遮罩（对话框外围区域偏暗） ===
+        # 检查对话框上方30像素的像素是否偏暗
+        above_y = max(0, y_min - 30)
+        above_region = color[above_y:y_min, int(sw*0.3):int(sw*0.7)]
+        dark_pixels = ((above_region[:,:,0] < 80) & (above_region[:,:,1] < 80) & (above_region[:,:,2] < 80))
+        has_overlay = above_region.size > 0 and dark_pixels.sum() / above_region.size > 0.3
+
+        if not has_overlay:
+            return None
+
+        # === 第三步：在对话框容器内搜索确定按钮 ===
+        # 按钮通常在对话框的右下部分
+        btn_region = (x_min, y_min + dh//2, x_max, y_max)
+        r = ImageUtils.match(gray, tmpl, btn_region)
+
+        if r:
+            cx, cy, score = r
+            if self._check_blue(color, cx, cy, tw, th, sh, sw):
+                return (cx, cy, score)
+
+        # 兜底：在整个对话框区域内搜索
+        r2 = ImageUtils.match(gray, tmpl, (x_min, y_min, x_max, y_max))
+        if r2:
+            cx, cy, score = r2
+            if self._check_blue(color, cx, cy, tw, th, sh, sw):
+                return (cx, cy, score)
+
         return None
 
-    def find_incomplete(self, color, sw, sh):
+    def find_incomplete(self, color, gray, sw, sh, done_positions=None):
+        """
+        检测'未完成'课程卡片
+        逐字对比法：只匹配第一个字（'未' vs '已'），大幅提高准确率
+        """
+        t_wei = self.tmpl.incomplete_txt   # '未' 字模板 (22x16)
+        t_yi  = self.tmpl.yiwancheng_txt   # '已' 字模板 (23x18)
+        if not t_wei or not t_yi: return None
+
         r, g, b = color[:,:,0], color[:,:,1], color[:,:,2]
-        gray_m = (np.abs(r.astype(int)-g.astype(int))<30) & (np.abs(g.astype(int)-b.astype(int))<30) & (r>80) & (r<180)
         blue_m = (b>160) & (r<120) & (g<180)
 
-        # 搜索课程卡片区域：跳过页面头部
+        # 课程卡片区域
         x1, x2 = int(sw*0.10), int(sw*0.90)
         y1, y2 = int(sh*0.35), int(sh*0.85)
-        gray_m[:y1,:] = gray_m[y2:,:] = gray_m[:,:x1] = gray_m[:,x2:] = False
         blue_m[:y1,:] = blue_m[y2:,:] = blue_m[:,:x1] = blue_m[:,x2:] = False
 
         bys, bxs = np.where(blue_m)
         if len(bxs) < 50: return None
 
-        gys, gxs = np.where(gray_m)
-        if len(gxs) < 50: return None
-
-        # 找到所有蓝色矩形标签（聚类x坐标）
+        # 聚类蓝色标签
         uniq_bx = sorted(set(int(x) for x in bxs))
         blue_clusters = []
         cur = [uniq_bx[0]]
         for x in uniq_bx[1:]:
-            if x - cur[-1] < 12:
-                cur.append(x)
+            if x - cur[-1] < 12: cur.append(x)
             else:
                 if len(cur) > 3: blue_clusters.append((cur[0], cur[-1]))
                 cur = [x]
         if len(cur) > 3: blue_clusters.append((cur[0], cur[-1]))
 
-        # 筛选：矩形标签（宽高比>1.5，宽度适中）
         candidates = []
         for bx1, bx2 in blue_clusters:
             bw = bx2 - bx1
-            if bw < 40 or bw > 160:
-                continue
-            # 找到这个蓝色标签的Y范围
-            col_blue = bxs[(bxs >= bx1) & (bxs <= bx2)]
-            if len(col_blue) < 20: continue
-            col_ys = bys[(bxs >= bx1) & (bxs <= bx2)]
-            by_min, by_max = col_ys.min(), col_ys.max()
+            if bw < 40 or bw > 160: continue
+            col = bxs[(bxs>=bx1)&(bxs<=bx2)]
+            if len(col) < 20: continue
+            cys = bys[(bxs>=bx1)&(bxs<=bx2)]
+            by_min, by_max = cys.min(), cys.max()
             bh = by_max - by_min
-            if bh < 10 or bw / max(bh, 1) < 1.3:  # 必须够扁（宽高比>1.3）
-                continue
+            if bh < 10 or bw/max(bh,1) < 1.3: continue
 
             cy = (by_min + by_max) // 2
-            # 检查左边有足够灰色文字（"未完成"）
-            left_gray = gxs[(gxs > bx1 - 200) & (gxs < bx1) & (gys > cy - 10) & (gys < cy + 10)]
-            if len(left_gray) < 20:
-                continue
 
-            # 这个蓝色标签上方不应有太多蓝色（排除嵌套在蓝色区块中的）
-            above_blue = blue_m[max(0,by_min-15):by_min, bx1:bx2].sum()
-            below_blue = blue_m[by_max:min(sh,by_max+15), bx1:bx2].sum()
-            if above_blue > 50 or below_blue > 50:
-                continue  # 这个蓝色标签嵌在更大的蓝色区块中
+            # 在蓝色标签左侧搜索第一个字
+            left_region = (max(0,bx1-200), max(0,cy-20), bx1, min(sh,cy+20))
 
-            gx = (left_gray.min() + left_gray.max()) // 2
-            # 质量：左边灰色越多越好，蓝色标签越独立越好
-            quality = min(len(left_gray) / 100.0, 1.0)
-            candidates.append((gx, cy, quality))
+            # 匹配'未'字
+            r_wei = ImageUtils.match(gray, t_wei, left_region)
+            score_wei = r_wei[2] if r_wei else -1
+
+            # 匹配'已'字
+            r_yi = ImageUtils.match(gray, t_yi, left_region)
+            score_yi = r_yi[2] if r_yi else -1
+
+            # 判定逻辑：两者都有时需要明确差距
+            if score_wei < 0.40:
+                continue  # '未'字不匹配
+            if score_yi > 0 and score_wei - score_yi < 0.08:
+                continue  # 差异不够大，不确定
+            if score_yi > 0 and score_yi > score_wei:
+                continue  # '已'字得分更高 → 是"已完成"
+
+            # 通过！点击位置
+            gx = bx1 - 100
+            click_y = by_min - 30
+
+            if done_positions:
+                too_close = False
+                for dx, dy in done_positions:
+                    if abs(gx-dx) < 80 and abs(click_y-dy) < 80:
+                        too_close = True; break
+                if too_close: continue
+
+            candidates.append((gx, click_y, score_wei))
 
         if not candidates: return None
-
-        # 按Y排序，取最靠上的
         candidates.sort(key=lambda p: p[1])
         return candidates[0][:2]
 
@@ -364,6 +434,8 @@ class AutoLearner:
         self.course_scrolls = 0
         self.tab_index = 0
         self.needs_refresh = False  # 进入选课页时需刷新页面
+        self.done_positions = set()   # 已完成的卡片位置: {(gx, gy), ...}
+        self.last_clicked = None      # 最近一次点击的卡片位置
         self.manual = False
         self.templates = Templates()
         self.detector = Detector(self.templates)
@@ -426,12 +498,17 @@ class AutoLearner:
         # 全局优先：弹窗确认按钮任何时候都立即处理
         confirm = self.detector.find_confirm(color, gray, sw, sh)
         if confirm:
-            cx, cy, score, name = confirm
-            log(f"第{self.scan_count}轮 [{_STATE_NAMES[self.state]}] 弹窗确认 [{name}] ({cx},{cy})")
-            self._do_click(img, cx, cy, score, name)
-            time.sleep(5)
-            # 弹窗确认后很可能回到课程列表，标记需要刷新
-            self.needs_refresh = True
+            cx, cy, score = confirm
+            # 避免重复点击同一个位置（10像素内）
+            same_spot = self.last_clicked and abs(cx - self.last_clicked[0]) < 10 and abs(cy - self.last_clicked[1]) < 10
+            if same_spot:
+                log(f"  弹窗 [{cx},{cy}] 与上次位置相同，跳过")
+            else:
+                log(f"第{self.scan_count}轮 [{_STATE_NAMES[self.state]}] 弹窗 [{cx},{cy}]")
+                self._do_click(img, cx, cy, score, 'confirm')
+                self.last_clicked = (cx, cy)
+                time.sleep(5)
+                self.needs_refresh = True
             return
 
         log(f"第{self.scan_count}轮 [{_STATE_NAMES[self.state]}]")
@@ -477,7 +554,7 @@ class AutoLearner:
         has_next = len(self.detector.find_next(color, gray, sw, sh)) > 0
         center = color[int(sh*0.2):int(sh*0.8), int(sw*0.1):int(sw*0.8)]
         dark_ratio = ((center[:,:,0]<50) & (center[:,:,1]<50) & (center[:,:,2]<50)).sum() / center.shape[0] / center.shape[1]
-        has_course = self.detector.find_incomplete(color, sw, sh) is not None
+        has_course = self.detector.find_incomplete(color, gray, sw, sh, self.done_positions) is not None
 
         if has_close or has_next or dark_ratio > 0.3:
             return State.VIDEO
@@ -515,15 +592,19 @@ class AutoLearner:
         log(f"  视频播放中，等待下一节...")
 
     def _do_course(self, img, color, gray, sw, sh):
-        inc = self.detector.find_incomplete(color, sw, sh)
+        inc = self.detector.find_incomplete(color, gray, sw, sh, self.done_positions)
         if inc:
             gx, gy = inc
+            self.last_clicked = (gx, gy)  # 记录本次点击位置
             self._do_click(img, gx, gy, 0.8, 'incomplete')
             time.sleep(2)
             _, c2, g2 = ImageUtils.screenshot()
             sw2, sh2 = c2.shape[1], c2.shape[0]
             close = self.detector.find_close(c2, g2, sw2, sh2)
             if close:
+                # 成功进入课程 → 标记此位置为已完成
+                self.done_positions.add((gx, gy))
+                log(f"  卡片 ({gx},{gy}) 已加入完成列表")
                 self.course_scrolls = 0
                 self.state = State.VIDEO
                 self.needs_refresh = False
@@ -531,7 +612,9 @@ class AutoLearner:
                 log("  -> 视频")
                 return
             else:
-                log(f"  误点击 ({gx},{gy})，跳过继续...")
+                # 点击了但没进入课程（误点击），也标记避免重试
+                self.done_positions.add((gx, gy))
+                log(f"  误点击 ({gx},{gy})，标记避免重试...")
 
         # 还没滚到底，一次性跳到底
         if self.course_scrolls == 0:
@@ -543,14 +626,17 @@ class AutoLearner:
             return
 
         # 在底部检查是否有未完成
-        inc2 = self.detector.find_incomplete(color, sw, sh)
+        inc2 = self.detector.find_incomplete(color, gray, sw, sh, self.done_positions)
         if inc2:
             gx, gy = inc2
+            self.last_clicked = (gx, gy)
             self._do_click(img, gx, gy, 0.8, 'incomplete')
             time.sleep(2)
             _, c2, g2 = ImageUtils.screenshot()
             sw2, sh2 = c2.shape[1], c2.shape[0]
             if self.detector.find_close(c2, g2, sw2, sh2):
+                self.done_positions.add((gx, gy))
+                log(f"  卡片 ({gx},{gy}) 已加入完成列表")
                 self.course_scrolls = 0
                 self.state = State.VIDEO
                 self.needs_refresh = False
@@ -558,7 +644,8 @@ class AutoLearner:
                 log("  -> 视频")
                 return
             else:
-                log("  误点击，继续...")
+                self.done_positions.add((gx, gy))
+                log(f"  误点击 ({gx},{gy})，标记避免重试...")
 
         # 底部也没有 → 检查是否有翻页栏
         pg = self.detector.find_pagination(gray, color, sw, sh)
@@ -622,8 +709,8 @@ class AutoLearner:
             sw2, sh2 = c2.shape[1], c2.shape[0]
             confirm = self.detector.find_confirm(c2, g2, sw2, sh2)
             if confirm:
-                cx2, cy2, score2, name2 = confirm
-                log(f"  链式点击弹窗 [{name2}] ({cx2},{cy2})")
+                cx2, cy2, score2 = confirm
+                log(f"  链式点击弹窗 ({cx2},{cy2})")
                 ActionExecutor.click(cx2, cy2)
                 self.clicks += 1
                 time.sleep(5)
@@ -647,7 +734,7 @@ class AutoLearner:
         elif name == 'close':
             c = self.detector.find_confirm(color, gray, sw, sh)
             ok = c is not None
-        elif name in ('confirm', 'done_confirm'):
+        elif name == 'confirm':
             c = self.detector.find_confirm(color, gray, sw, sh)
             ok = c is None
         elif name == 'tab':
